@@ -17,11 +17,23 @@
 //!   `/device` lists what is paired; a `SubscribeRequest` on a zone's `/status` is how a wall
 //!   dimmer press reaches us without polling.
 //!
-//! Core has no idea any of this is going on. Pairing rides `SetupStep::Fetch` against a
-//! `leaps://` pseudo-URL core's `Http::request` knows how to speak (waiting for the
-//! button-press push is core's job too — see its `request_leap`); the live connection rides
-//! the same `control: 0` Tx/rx path the integration-port driver uses, just wrapped in TLS
-//! because the manifest says so.
+//! **The controller has no idea any of this is going on, and that is the point.** LEAP used
+//! to live in core: the ports, the line framing, skipping the acknowledgements a bridge
+//! volunteers, and waiting for the button push were all its business, reached through a
+//! `leaps://` pseudo-URL. One vendor's protocol in the controller everyone runs.
+//!
+//! Now the controller offers only what any device might need — open a connection, optionally
+//! with a client certificate, write bytes, listen for a while — as `SetupStep::Session`. It
+//! holds the socket, so this driver still never touches one and stays sandboxable. Everything
+//! above the socket is here, where the knowledge is:
+//!
+//! - which ports ([`PAIR_PORT`], [`LEAP_PORT`])
+//! - where one message ends ([`leap_line`], [`leap_objects`])
+//! - which reply is the answer rather than an acknowledgement ([`leap_answer`])
+//! - what a button press looks like ([`CasetaLeap::button_pressed`])
+//!
+//! The live connection rides the same `control: 0` Tx/rx path the integration-port driver
+//! uses, just wrapped in TLS because the manifest says so.
 
 mod lap_identity;
 
@@ -33,6 +45,46 @@ const DIMMER_ID: &str = "lutron.caseta.leap_dimmer";
 
 /// `control: 0` is the driver's own network transport — core owns the socket.
 const NET: LocalId = 0;
+
+/// The bridge's unauthenticated pairing port, and its authenticated one. Lutron's numbers,
+/// which is why they live here and not in the controller.
+const PAIR_PORT: u16 = 8083;
+const LEAP_PORT: u16 = 8081;
+
+/// How many one-second polls to give someone to walk over and press the button.
+const PAIR_WAIT_SECS: u32 = 30;
+
+// ---------------------------------------------------------------------------------------
+// LEAP framing
+//
+// One JSON object per line over TLS. The controller hands back whatever bytes arrived in a
+// window and does not know where one message ends — deliberately, because this is the part
+// that is Lutron's and not every device's.
+// ---------------------------------------------------------------------------------------
+
+/// A message, framed as the bridge expects to read it.
+fn leap_line(msg: &Value) -> String {
+    format!("{msg}\n")
+}
+
+/// Every complete JSON object in what arrived, ignoring partial or junk lines.
+fn leap_objects(received: &str) -> impl Iterator<Item = Value> + '_ {
+    received
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+}
+
+/// The reply to what was asked, as opposed to what the bridge volunteered.
+///
+/// A bridge answers `/device` with an unsolicited `SubscribeResponse` or two ahead of the
+/// actual `ReadResponse` — confirmed against real hardware, and the same thing
+/// `pylutron-caseta`'s own read loop does: keep reading past acknowledgements it did not ask
+/// for. Taking the first object instead would silently hand back an acknowledgement.
+fn leap_answer(received: &str) -> Value {
+    leap_objects(received)
+        .find(|v| v.get("CommuniqueType").and_then(Value::as_str) != Some("SubscribeResponse"))
+        .unwrap_or(Value::Null)
+}
 
 #[derive(Default)]
 pub struct CasetaLeap;
@@ -170,13 +222,94 @@ impl CasetaLeap {
         }
     }
 
-    /// Sent over `leaps://`, presenting Lutron's published pairing identity as this
-    /// connection's own client certificate — see [`lap_identity`]. Core's `request_leap`
-    /// handles waiting for the button-press confirmation before this is written; the driver
-    /// just has to frame the request the way a real bridge expects it, matching
-    /// `pylutron-caseta` field-for-field since that is the proven-working shape.
+    /// Open the pairing connection and listen, without sending anything yet.
+    ///
+    /// On real hardware, sending the CSR before the bridge has pushed its own confirmation
+    /// that the button was physically pressed is answered with a handshake-level rejection,
+    /// not a polite "not yet". So the connection is opened, held, and listened to first — and
+    /// it has to be the *same* connection, because the push is not repeated for a new one.
+    ///
+    /// The connection presents Lutron's published pairing identity as its client certificate
+    /// (see [`lap_identity`]); the per-installation certificate the bridge signs in response
+    /// is what authorises anything afterward.
     fn send_pair_request(state: &Value) -> (SetupStep, Value) {
         let address = field(state, "address");
+        (
+            SetupStep::Session {
+                session: None,
+                open: Some(Connect::mutual_tls(
+                    address,
+                    PAIR_PORT,
+                    lap_identity::LAP_CERT_PEM,
+                    lap_identity::LAP_KEY_PEM,
+                )),
+                send: String::new(),
+                read_ms: 1000,
+                close: false,
+                note: "pair".into(),
+            },
+            with_fields(state, &[("stage", "pairing"), ("waited", "0")]),
+        )
+    }
+
+    /// The bridge pushes this once someone physically presses its button. Nothing else in the
+    /// stream means the same thing, so this is the gate the CSR waits behind.
+    fn button_pressed(received: &str) -> bool {
+        leap_objects(received).any(|v| {
+            v.pointer("/Body/Status/Permissions")
+                .and_then(Value::as_array)
+                .is_some_and(|p| p.iter().any(|x| x.as_str() == Some("PhysicalAccess")))
+        })
+    }
+
+    /// Waiting on the button, on a connection that is already open. Poll until the push
+    /// arrives, then write the CSR down the same connection.
+    fn await_button_press(state: &Value, input: &Args) -> (SetupStep, Value) {
+        if let Some(err) = input.get("error").and_then(Value::as_str) {
+            return (
+                instruct(
+                    "Not paired yet",
+                    &format!(
+                        "{err} — press the button on the bridge right when you continue \
+                         (the bridge only recognizes a press while a client is connected and \
+                         waiting), then continue."
+                    ),
+                ),
+                with_fields(state, &[("stage", "ready_to_pair")]),
+            );
+        }
+
+        let session = input.get("session").and_then(Value::as_u64).map(|v| v as u32);
+        let received = input.get("received").and_then(Value::as_str).unwrap_or("");
+        let waited: u32 = field(state, "waited").parse().unwrap_or(0);
+
+        if !Self::button_pressed(received) {
+            if waited >= PAIR_WAIT_SECS {
+                return (
+                    instruct(
+                        "No button press",
+                        "The bridge did not report a press. Continue and press the button on \
+                         the front of the bridge as soon as the next screen appears.",
+                    ),
+                    with_fields(state, &[("stage", "ready_to_pair")]),
+                );
+            }
+            return (
+                SetupStep::Session {
+                    session,
+                    open: None,
+                    send: String::new(),
+                    read_ms: 1000,
+                    close: false,
+                    note: "pair".into(),
+                },
+                with_fields(state, &[("waited", &(waited + 1).to_string())]),
+            );
+        }
+
+        // Pressed. Send the signing request down the connection that saw the press, framed
+        // the way a real bridge expects — matching `pylutron-caseta` field for field, since
+        // that is the proven-working shape.
         let csr = field(state, "csr_pem");
         let body = json!({
             "Header": {
@@ -194,13 +327,16 @@ impl CasetaLeap {
                 },
             },
         });
-        let request = HttpRequest::new("POST", format!("leaps://{address}:8083/pair"))
-            .header("x-client-cert", lap_identity::LAP_CERT_PEM)
-            .header("x-client-key", lap_identity::LAP_KEY_PEM)
-            .json(body.to_string());
         (
-            SetupStep::Fetch { request, note: "pair".into() },
-            with_fields(state, &[("stage", "pairing")]),
+            SetupStep::Session {
+                session,
+                open: None,
+                send: leap_line(&body),
+                read_ms: 6000,
+                close: true,
+                note: "pair".into(),
+            },
+            with_fields(state, &[("stage", "pair_sent")]),
         )
     }
 
@@ -218,7 +354,7 @@ impl CasetaLeap {
                 with_fields(state, &[("stage", "ready_to_pair")]),
             );
         }
-        let response = input.get("response").cloned().unwrap_or(Value::Null);
+        let response = leap_answer(input.get("received").and_then(Value::as_str).unwrap_or(""));
         let cert = response
             .pointer("/Body/SigningResult/Certificate")
             .and_then(Value::as_str)
@@ -257,11 +393,17 @@ impl CasetaLeap {
             if v.is_empty() { field(state, "key_pem") } else { v }
         };
         let body = json!({ "CommuniqueType": "ReadRequest", "Header": { "Url": "/device" } });
-        let request = HttpRequest::new("POST", format!("leaps://{address}:8081/device"))
-            .header("x-client-cert", cert)
-            .header("x-client-key", key)
-            .json(body.to_string());
-        (SetupStep::Fetch { request, note: "list".into() }, state.clone())
+        (
+            SetupStep::Session {
+                session: None,
+                open: Some(Connect::mutual_tls(address, LEAP_PORT, cert, key)),
+                send: leap_line(&body),
+                read_ms: 6000,
+                close: true,
+                note: "list".into(),
+            },
+            state.clone(),
+        )
     }
 
     /// Turn a `/device` reply into candidates. Only dimmable outputs are offered — a Pico
@@ -341,7 +483,10 @@ impl DriverModule for CasetaLeap {
 
         match field(state, "stage").as_str() {
             "ready_to_pair" => Self::send_pair_request(state),
-            "pairing" => Self::handle_pair_response(state, input),
+            // Pairing is two stages on one held connection: wait for the bridge to report the
+            // button press, then send the signing request down the same socket.
+            "pairing" => Self::await_button_press(state, input),
+            "pair_sent" => Self::handle_pair_response(state, input),
             "listing" => Self::handle_device_list(state, input, true),
             _ => Self::ask_address(state, input),
         }
@@ -495,3 +640,50 @@ impl CasetaLeap {
 }
 
 export_driver!(CasetaLeap);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two pieces of Lutron knowledge that used to live in the controller.
+    ///
+    /// A bridge volunteers acknowledgements ahead of the reply you asked for, and announces a
+    /// button press unprompted. Neither is something a generic transport could recognise —
+    /// which is the whole reason this logic belongs to the driver.
+    #[test]
+    fn the_answer_is_picked_out_from_what_the_bridge_volunteered() {
+        let stream = "\
+{\"CommuniqueType\":\"SubscribeResponse\",\"Body\":{\"noise\":1}}
+{\"CommuniqueType\":\"SubscribeResponse\",\"Body\":{\"noise\":2}}
+{\"CommuniqueType\":\"ReadResponse\",\"Body\":{\"Devices\":[{\"Name\":\"Kitchen\"}]}}
+";
+        let answer = leap_answer(stream);
+        assert_eq!(answer["CommuniqueType"], "ReadResponse");
+        assert_eq!(answer["Body"]["Devices"][0]["Name"], "Kitchen");
+
+        // Nothing but acknowledgements is not an answer, and must not be mistaken for one.
+        assert!(leap_answer("{\"CommuniqueType\":\"SubscribeResponse\"}\n").is_null());
+        // A half-written line is normal when a read window closes mid-message.
+        assert!(leap_answer("{\"Communiqu").is_null());
+    }
+
+    #[test]
+    fn a_button_press_is_recognised_only_from_the_bridges_own_push() {
+        let pressed = "{\"Body\":{\"Status\":{\"Permissions\":[\"PhysicalAccess\"]}}}\n";
+        assert!(CasetaLeap::button_pressed(pressed));
+
+        // Connected but not yet pressed: the bridge chatters, and none of it means go.
+        assert!(!CasetaLeap::button_pressed(
+            "{\"Body\":{\"Status\":{\"Permissions\":[]}}}\n{\"CommuniqueType\":\"SubscribeResponse\"}\n"
+        ));
+        assert!(!CasetaLeap::button_pressed(""));
+    }
+
+    #[test]
+    fn a_message_is_framed_one_json_object_per_line() {
+        let line = leap_line(&json!({ "Header": { "Url": "/device" } }));
+        assert!(line.ends_with('\n'), "the bridge reads by line");
+        assert_eq!(line.matches('\n').count(), 1);
+        assert_eq!(leap_answer(&line)["Header"]["Url"], "/device");
+    }
+}
