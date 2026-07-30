@@ -25,7 +25,7 @@
 
 mod lap_identity;
 
-use juno_driver_sdk::*;
+use driver_sdk::*;
 use std::collections::BTreeMap;
 
 const BRIDGE_ID: &str = "lutron.caseta.leap_bridge";

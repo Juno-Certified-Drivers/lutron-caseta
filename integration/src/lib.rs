@@ -15,7 +15,7 @@
 //! Note this needs the **PRO** bridge. The standard Caséta bridge has no integration port at
 //! all, which is the single most common reason one of these installs does not work.
 
-use juno_driver_sdk::*;
+use driver_sdk::*;
 use serde_json::Value;
 
 #[derive(Default)]

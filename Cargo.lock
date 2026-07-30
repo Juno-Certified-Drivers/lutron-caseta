@@ -31,6 +31,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
+name = "driver-sdk"
+version = "0.1.0"
+source = "git+https://github.com/junohouse/driver-sdk?tag=v0.1.0#3afed714ad8c3681cec9c90655d69f61bf04840c"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -57,7 +66,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "juno-driver-lutron-caseta"
 version = "1.0.0"
 dependencies = [
- "juno-driver-sdk",
+ "driver-sdk",
  "serde_json",
 ]
 
@@ -65,17 +74,8 @@ dependencies = [
 name = "juno-driver-lutron-caseta-leap"
 version = "1.0.0"
 dependencies = [
- "juno-driver-sdk",
+ "driver-sdk",
  "rcgen",
- "serde_json",
-]
-
-[[package]]
-name = "juno-driver-sdk"
-version = "0.1.0"
-source = "git+https://github.com/junohouse/juno-driver-sdk?tag=v0.1.0#a806b55161ba21dc1df044aac88fa9035389cd68"
-dependencies = [
- "serde",
  "serde_json",
 ]
 
