@@ -1,0 +1,17 @@
+# Push to main for a beta, tag v1.2.3 for a release. Everything else is inherited.
+#
+# Two packages: the Smart Bridge PRO's telnet integration port, and LEAP. A house uses one or
+# the other, so they ship as separate artifacts rather than one that guesses.
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+jobs:
+  driver:
+    uses: junohouse/driver-ci/.github/workflows/driver.yml@v1
+    with:
+      packages: '["integration", "leap"]'
+    secrets: inherit

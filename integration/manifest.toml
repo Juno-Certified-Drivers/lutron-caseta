@@ -1,0 +1,45 @@
+[driver]
+id = "lutron.caseta.dimmer"
+name = "Lutron Caséta Dimmer"
+manufacturer = "Lutron"
+version = "1.0.0"
+runtime = "native"
+
+# Caséta dimmers do not do colour, and saying so is the point: `set_color` will not exist on
+# this device's contract, so no UI, automation, or AI request can ever ask for it.
+[[proxy]]
+id = 1
+type = "light"
+primary = true
+capabilities = { dimmer = true, supports_ramp = true, ramp_rate_max_ms = 3600000, min_on_level = 1, max_on_level = 100 }
+
+[[transport]]
+kind = "network"
+port = 23
+discovery = "mdns"
+keepalive = true
+
+[[property]]
+name = "Bridge address"
+type = "string"
+tooltip = "IP of the Caséta Smart Bridge PRO (the standard bridge has no integration port)"
+
+[[property]]
+name = "Integration id"
+type = "ranged_int"
+min = 1
+max = 255
+tooltip = "The device's Integration ID from the bridge's integration report"
+
+[[property]]
+name = "Default fade"
+type = "ranged_int"
+min = 0
+max = 60
+default = 1
+unit = "s"
+tooltip = "Fade time used when a command does not specify one"
+
+[discovery]
+mdns = ["_lutron._tcp"]
+mac_oui = ["C4:35:D9"]

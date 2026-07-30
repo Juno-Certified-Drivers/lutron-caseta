@@ -1,0 +1,36 @@
+[driver]
+id = "lutron.caseta.leap_dimmer"
+name = "Lutron Caséta Dimmer (LEAP)"
+manufacturer = "Lutron"
+version = "1.0.0"
+runtime = "native"
+parent = "lutron.caseta.leap_bridge"
+
+# Found and adopted through the bridge's own setup flow, not on its own — see
+# `lutron.caseta.leap_bridge`. It never carries its own address or certificate; both are the
+# bridge's, inherited.
+[[proxy]]
+id = 1
+type = "light"
+primary = true
+capabilities = { dimmer = true, supports_ramp = true, ramp_rate_max_ms = 3600000, min_on_level = 1, max_on_level = 100 }
+
+[[transport]]
+kind = "network"
+port = 8081
+tls = true
+keepalive = true
+
+[[property]]
+name = "Zone"
+type = "string"
+tooltip = "The device's zone href on the bridge — filled in automatically when adopted"
+
+[[property]]
+name = "Default fade"
+type = "ranged_int"
+min = 0
+max = 60
+default = 1
+unit = "s"
+tooltip = "Fade time used when a command does not specify one"
