@@ -1,19 +1,15 @@
 # Lutron Caséta
 
-Caséta dimmers, two ways. A house uses one or the other, never both.
+Caséta dimmers over LEAP, the TLS protocol every current Smart Bridge speaks.
 
 | Package | Drivers | Needs |
 | --- | --- | --- |
 | [`leap/`](leap) | `lutron.caseta.leap_bridge`, `lutron.caseta.leap_dimmer` | Any current Smart Bridge |
-| [`integration/`](integration) | `lutron.caseta.dimmer` | Smart Bridge **PRO** only |
 
-**Start with `leap`.** It is what every current bridge speaks. The telnet integration port in
-`integration/` is simpler but only the PRO bridge exposes it at all — on a standard bridge
-there is nothing listening.
-
-They are separate packages because they share no control code: one is line-oriented telnet,
-the other is JSON over mutually-authenticated TLS. A single payload would have to guess from
-instance state which bridge it was talking to.
+There was a second package, `integration/`, driving the Smart Bridge PRO's telnet integration
+port as `lutron.caseta.dimmer`. Only the PRO bridge ever exposed that port — on a standard
+bridge nothing was listening — so it was a second control path, sharing no code with this one,
+that most houses could not use. It is gone; `lutron.caseta.dimmer` is retired.
 
 ## Pairing (LEAP)
 
@@ -40,7 +36,6 @@ proves is what the driver will actually see.
 ## Building
 
 ```bash
-cargo build --release            # both packages
 cargo build --release -p juno-driver-lutron-caseta-leap
 ```
 

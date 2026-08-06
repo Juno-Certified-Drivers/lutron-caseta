@@ -1,12 +1,11 @@
-# Two packages, because Caséta has two mutually exclusive control paths.
-#
-# `integration` is the telnet integration protocol, which only the Smart Bridge PRO exposes.
 # `leap` is the TLS protocol every current bridge speaks, and needs a paired certificate.
-# A house uses one or the other, never both, and they share no control code — so they are two
-# payloads rather than one that dispatches on instance state to guess which bridge it has.
+#
+# There was a second package here, `integration`, driving the telnet integration port. Only the
+# Smart Bridge PRO ever exposed that port — on a standard bridge nothing was listening — so it
+# was a whole control path most houses could not use. Dropped rather than carried.
 [workspace]
 resolver = "3"
-members = ["integration", "leap"]
+members = ["leap"]
 
 # A driver is a dylib the controller loads; a debug-sized one is several times larger to ship.
 [profile.release]
