@@ -71,7 +71,7 @@ fn leap_line(msg: &Value) -> String {
 fn leap_objects(received: &str) -> impl Iterator<Item = Value> + '_ {
     received
         .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+        .filter_map(|l| driver_sdk::serde_json::from_str::<Value>(l.trim()).ok())
 }
 
 /// The reply to what was asked, as opposed to what the bridge volunteered.
@@ -632,7 +632,7 @@ impl CasetaLeap {
 
         let mut out = Vec::new();
         for line in text.split('\n').map(str::trim).filter(|l| !l.is_empty()) {
-            let Ok(msg) = serde_json::from_str::<Value>(line) else { continue };
+            let Ok(msg) = driver_sdk::serde_json::from_str::<Value>(line) else { continue };
             let Some(status) = msg.pointer("/Body/ZoneStatus") else { continue };
             let href = status.pointer("/Zone/href").and_then(Value::as_str).unwrap_or("");
             if href != mine {

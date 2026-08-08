@@ -13,8 +13,7 @@ crate-type = ["cdylib", "rlib"]
 # The SDK re-exports core's types, so the two are one unit: a driver built against a
 # different core than it runs on is refused by the ABI check rather than half-understood.
 # Pinning the tag is what makes that check redundant in practice.
-driver-sdk = { git = "https://github.com/junohouse/driver-sdk", tag = "v0.6.0" }
-serde_json = "1"
+driver-sdk = { git = "https://github.com/junohouse/driver-sdk", tag = "v0.7.0" }
 
 # Pairing needs a keypair and a CSR to hand the bridge — nothing in std or the already-installed
 # deps generates X.509, and rolling ASN.1 DER by hand for this is not a reasonable substitute.
