@@ -97,6 +97,11 @@ fn field(state: &Value, key: &str) -> String {
     state.get(key).and_then(Value::as_str).unwrap_or("").to_string()
 }
 
+/// The same, for a value core handed back in `input`.
+fn field_of(input: &Args, key: &str) -> String {
+    input.get(key).and_then(Value::as_str).unwrap_or("").to_string()
+}
+
 /// Merge a few keys into a state object, keeping everything else. State is opaque to core —
 /// it round-trips through the installer's browser between steps, so it has to be plain JSON.
 fn with_fields(state: &Value, updates: &[(&str, &str)]) -> Value {
@@ -113,19 +118,6 @@ fn instruct(title: &str, body: &str) -> SetupStep {
         body: body.into(),
         continue_label: "Continue".into(),
     }
-}
-
-fn generate_csr() -> Result<(String, String), String> {
-    let key_pair = rcgen::KeyPair::generate().map_err(|e| e.to_string())?;
-    let mut params = rcgen::CertificateParams::default();
-    params.distinguished_name = rcgen::DistinguishedName::new();
-    params
-        .distinguished_name
-        .push(rcgen::DnType::CommonName, "juno");
-    let csr = params
-        .serialize_request(&key_pair)
-        .map_err(|e| e.to_string())?;
-    Ok((key_pair.serialize_pem(), csr.pem().map_err(|e| e.to_string())?))
 }
 
 /// What core's mDNS scan found before this flow's first call, if anything — `(name, address)`.
@@ -193,33 +185,55 @@ impl CasetaLeap {
         )
     }
 
+    /// Ask core for the pairing identity, and remember where we are going.
+    ///
+    /// This used to call `rcgen` here. It cost 291 KB in a driver that is downloaded per
+    /// project — `rcgen`, `ring` and seven crates behind them — for the four lines that made
+    /// one certificate, every one of which core already had linked for its own TLS. Nothing a
+    /// driver links is shared with anything; a `SetupStep` is. See `SetupStep::MakeIdentity`.
     fn begin_pairing(state: &Value, addr: &str) -> (SetupStep, Value) {
-        match generate_csr() {
-            Ok((key_pem, csr_pem)) => (
-                instruct(
-                    "Ready to pair",
-                    "When you continue, this connects to the bridge and waits up to 30 \
-                     seconds for it to confirm its button was pressed — so press and release \
-                     the small button on top of the Caséta Smart Bridge right as you continue, \
-                     not before.",
-                ),
-                with_fields(
-                    state,
-                    &[
-                        ("stage", "ready_to_pair"),
-                        ("address", addr),
-                        ("key_pem", &key_pem),
-                        ("csr_pem", &csr_pem),
-                    ],
-                ),
-            ),
-            Err(e) => (
+        (
+            SetupStep::MakeIdentity {
+                common_name: "juno".into(),
+                note: String::new(),
+            },
+            with_fields(state, &[("stage", "making_identity"), ("address", addr)]),
+        )
+    }
+
+    /// Core made the identity; hold on to it and get the installer ready to press the button.
+    fn identity_made(state: &Value, input: &Args) -> (SetupStep, Value) {
+        let (key_pem, csr_pem) = (field_of(input, "key_pem"), field_of(input, "csr_pem"));
+        if key_pem.is_empty() || csr_pem.is_empty() {
+            let why = field_of(input, "error");
+            return (
                 SetupStep::Failed {
-                    reason: format!("could not generate a pairing key: {e}"),
+                    reason: if why.is_empty() {
+                        "could not generate a pairing key".into()
+                    } else {
+                        format!("could not generate a pairing key: {why}")
+                    },
                 },
                 Value::Null,
-            ),
+            );
         }
+        (
+            instruct(
+                "Ready to pair",
+                "When you continue, this connects to the bridge and waits up to 30 \
+                 seconds for it to confirm its button was pressed — so press and release \
+                 the small button on top of the Caséta Smart Bridge right as you continue, \
+                 not before.",
+            ),
+            with_fields(
+                state,
+                &[
+                    ("stage", "ready_to_pair"),
+                    ("key_pem", &key_pem),
+                    ("csr_pem", &csr_pem),
+                ],
+            ),
+        )
     }
 
     /// Open the pairing connection and listen, without sending anything yet.
@@ -482,6 +496,7 @@ impl DriverModule for CasetaLeap {
         }
 
         match field(state, "stage").as_str() {
+            "making_identity" => Self::identity_made(state, input),
             "ready_to_pair" => Self::send_pair_request(state),
             // Pairing is two stages on one held connection: wait for the bridge to report the
             // button press, then send the signing request down the same socket.
